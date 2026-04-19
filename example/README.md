@@ -13,11 +13,11 @@ flutter run -d macos    # or linux / windows
 
 ### Requirements
 
-- `kimi` CLI on your `PATH`.
-- Authenticate the CLI once with `kimi login` (credentials are stored in
-  `~/.kimi/config.toml` and reused automatically). Alternatively export
-  `KIMI_API_KEY` / `KIMI_BASE_URL` / `KIMI_MODEL_NAME` in the environment you
-  launch Flutter from.
+- `kimi` CLI installed (any location — the example auto-resolves `kimi` from
+  `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`; or set
+  `KIMI_EXECUTABLE` to an absolute path).
+- Authenticate the CLI once with `kimi login`. OAuth tokens are saved under
+  `~/.kimi/credentials/` and refreshed automatically on every session.
 
 The app starts paused — hit **Start session** to spawn the CLI. Each prompt
 creates a new `KimiTurn`; tool calls render as chips, and approval requests

@@ -21,15 +21,9 @@ running multi-turn conversations.
 ## Prerequisites
 
 1. Install the Kimi CLI: <https://github.com/MoonshotAI/kimi-cli>.
-2. Authenticate — pick one:
-   - Run `kimi login` once (credentials saved to `~/.kimi/config.toml`; reused
-     automatically on every subsequent session). **Recommended.**
-   - Or export env vars in the shell that launches your app:
-     ```bash
-     export KIMI_API_KEY=your-api-key
-     export KIMI_BASE_URL=https://api.moonshot.ai/v1
-     export KIMI_MODEL_NAME=kimi-k2-thinking-turbo
-     ```
+2. Run `kimi login` once. The CLI stores OAuth tokens under
+   `~/.kimi/credentials/` and refreshes them automatically — no API key to
+   plumb through, no env vars to export.
 3. Verify: `kimi --version`.
 
 ## Install
