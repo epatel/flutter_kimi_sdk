@@ -1,0 +1,21 @@
+name: flutter_kimi_sdk_example
+description: Flutter desktop chat example for flutter_kimi_sdk.
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_kimi_sdk:
+    path: ..
+  flutter_markdown_plus: ^1.0.7
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
