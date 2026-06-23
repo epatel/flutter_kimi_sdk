@@ -29,7 +29,7 @@ stateDiagram-v2
 ```dart
 final session = await KimiSession.start(
   workDir: '/path/to/project',
-  model: 'kimi-k2-thinking-turbo',
+  model: 'kimi-k2.7-code',
   yoloMode: true,
 );
 await session.initialize(); // sends JSON-RPC initialize, waits up to 15s

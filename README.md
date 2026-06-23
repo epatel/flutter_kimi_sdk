@@ -30,7 +30,7 @@ running multi-turn conversations.
 
 ```yaml
 dependencies:
-  flutter_kimi_sdk: ^0.1.0
+  flutter_kimi_sdk: ^0.2.0
 ```
 
 ## Quick start
@@ -42,7 +42,7 @@ import 'package:flutter_kimi_sdk/flutter_kimi_sdk.dart';
 Future<void> main() async {
   final session = await KimiSession.start(
     workDir: Directory.current.path,
-    model: 'kimi-k2-thinking-turbo',
+    model: 'kimi-k2.7-code', // or leave null for the CLI default
     yoloMode: true, // auto-approve tool calls for demo purposes
   );
   await session.initialize();
@@ -61,6 +61,13 @@ Future<void> main() async {
   await session.close();
 }
 ```
+
+## Models
+
+The `model:` value is passed straight through to `kimi --model`, so any id the
+CLI accepts works. Current Moonshot ids: `kimi-k2.7-code` (default) and its
+faster `kimi-k2.7-code-highspeed` variant, plus `kimi-k2.6`, `kimi-k2.5`, and
+`moonshot-v1`. Leave it `null` to take the CLI default.
 
 ## Handling approvals
 

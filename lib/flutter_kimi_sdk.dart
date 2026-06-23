@@ -7,7 +7,7 @@
 /// ```dart
 /// final session = KimiSession.start(
 ///   workDir: Directory.current.path,
-///   model: 'kimi-k2-thinking-turbo',
+///   model: 'kimi-k2.7-code',
 ///   yoloMode: true,
 /// );
 /// await session.initialize();

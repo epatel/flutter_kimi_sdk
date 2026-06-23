@@ -1,3 +1,9 @@
+## 0.2.0
+
+- Docs: refresh model examples to current Moonshot ids (`kimi-k2.7-code` et al.);
+  the old `kimi-k2-thinking-turbo` example is gone. No code change — `model:` is
+  still a free-form passthrough to `kimi --model`.
+
 ## 0.1.0
 
 - Initial release.

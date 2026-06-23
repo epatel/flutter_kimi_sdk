@@ -17,7 +17,7 @@ const String kKimiProtocolVersion = '1.7';
 const String kKimiSdkName = 'flutter_kimi_sdk';
 
 /// SDK version sent during `initialize`.
-const String kKimiSdkVersion = '0.1.0';
+const String kKimiSdkVersion = '0.2.0';
 
 /// Lifecycle of a [KimiSession].
 enum KimiSessionState {
