@@ -28,9 +28,14 @@ conversations.
 
 ## Install
 
+The package is not published to pub.dev — depend on it via git:
+
 ```yaml
 dependencies:
-  flutter_kimi_sdk: ^0.3.0
+  flutter_kimi_sdk:
+    git:
+      url: https://github.com/epatel/flutter_kimi_sdk
+      ref: v0.3.0
 ```
 
 ## Quick start
