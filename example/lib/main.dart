@@ -140,21 +140,17 @@ class _ChatPageState extends State<ChatPage> {
           assistantMsg = _Message(role: 'assistant', text: '');
           _messages.add(assistantMsg);
         } else if (event is ToolResultEvent) {
+          final summary = event.output.trim();
           _messages.add(
             _Message(
               role: 'tool',
-              text: event.isError
-                  ? '✗ error: ${event.message}'
-                  : '✓ ${event.message}',
+              text: event.isError ? '✗ error: $summary' : '✓ $summary',
             ),
           );
           assistantMsg = _Message(role: 'assistant', text: '');
           _messages.add(assistantMsg);
         } else if (event is ApprovalRequestEvent) {
           _handleApproval(turn, event);
-        } else if (event is StatusUpdateEvent) {
-          _status =
-              'tokens in=${event.inputTokens ?? '-'} out=${event.outputTokens ?? '-'}';
         }
       });
     });
@@ -163,7 +159,7 @@ class _ChatPageState extends State<ChatPage> {
       final result = await turn.result;
       if (!mounted) return;
       setState(() {
-        _status = 'done (${result.status.name}, steps=${result.steps ?? '-'})';
+        _status = 'done (${result.status.name})';
         _busy = false;
       });
     } on KimiException catch (e) {
@@ -181,7 +177,7 @@ class _ChatPageState extends State<ChatPage> {
     final decision = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('${event.sender}: ${event.action}?'),
+        title: Text('Approve ${event.sender}?'),
         content: Text(event.description),
         actions: [
           TextButton(

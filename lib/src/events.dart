@@ -1,4 +1,4 @@
-// Typed events emitted during a [KimiTurn].
+// Typed events emitted during a [KimiTurn], decoded from ACP session updates.
 
 import 'types.dart';
 
@@ -11,32 +11,19 @@ sealed class KimiEvent {
   final Map<String, Object?> raw;
 }
 
-/// Emitted when the CLI accepts the `prompt` call and starts the turn.
+/// Emitted when the SDK submits the `session/prompt` call that starts the
+/// turn. Synthesized locally; ACP has no dedicated turn-begin notification.
 class TurnBeginEvent extends KimiEvent {
   /// Creates a [TurnBeginEvent].
   const TurnBeginEvent({required this.userInput, required super.raw});
 
-  /// The user input the turn started from. Either a string or a list of
-  /// content-part maps, as returned by the CLI.
+  /// The user input the turn started from: the ACP content-block list sent
+  /// as the prompt.
   final Object? userInput;
 }
 
-/// Emitted when a new step begins within the turn.
-class StepBeginEvent extends KimiEvent {
-  /// Creates a [StepBeginEvent].
-  const StepBeginEvent({required this.n, required super.raw});
-
-  /// Step index (1-based).
-  final int n;
-}
-
-/// Emitted when a step is interrupted.
-class StepInterruptedEvent extends KimiEvent {
-  /// Creates a [StepInterruptedEvent].
-  const StepInterruptedEvent({required super.raw});
-}
-
-/// Text / thinking output streamed from the agent.
+/// Text / thinking output streamed from the agent
+/// (`agent_message_chunk` / `agent_thought_chunk`).
 class ContentPartEvent extends KimiEvent {
   /// Creates a [ContentPartEvent].
   const ContentPartEvent({
@@ -52,16 +39,19 @@ class ContentPartEvent extends KimiEvent {
   /// The text payload (empty string for non-text kinds).
   final String text;
 
-  /// Original `type` string from the CLI, in case [kind] is [ContentKind.other].
+  /// Original ACP `sessionUpdate` string, in case [kind] is
+  /// [ContentKind.other].
   final String rawType;
 }
 
-/// Emitted when the agent invokes a tool.
+/// Emitted when the agent invokes a tool (`tool_call`).
 class ToolCallEvent extends KimiEvent {
   /// Creates a [ToolCallEvent].
   const ToolCallEvent({
     required this.id,
     required this.name,
+    required this.kind,
+    required this.status,
     required this.arguments,
     required super.raw,
   });
@@ -69,31 +59,49 @@ class ToolCallEvent extends KimiEvent {
   /// Stable ID for this tool call.
   final String id;
 
-  /// Tool / function name.
+  /// Tool title, e.g. `Bash`, `WriteFile`.
   final String name;
 
-  /// Serialized arguments string, if already assembled. May be null during
-  /// streaming (see [ToolCallPartEvent]).
+  /// ACP tool kind, e.g. `execute`, `read`, `edit` — null if not reported.
+  final String? kind;
+
+  /// Initial status, usually `pending`.
+  final String? status;
+
+  /// Serialized arguments, if the CLI included `rawInput`. Usually null at
+  /// this point — arguments stream in via [ToolCallUpdateEvent].
   final String? arguments;
 }
 
-/// Streaming chunk of tool-call arguments.
-class ToolCallPartEvent extends KimiEvent {
-  /// Creates a [ToolCallPartEvent].
-  const ToolCallPartEvent({required this.argumentsPart, required super.raw});
+/// Streaming progress for a tool call (`tool_call_update` while pending /
+/// in progress). Carries argument chunks and intermediate output.
+class ToolCallUpdateEvent extends KimiEvent {
+  /// Creates a [ToolCallUpdateEvent].
+  const ToolCallUpdateEvent({
+    required this.toolCallId,
+    required this.status,
+    required this.text,
+    required super.raw,
+  });
 
-  /// A chunk of the arguments JSON string.
-  final String argumentsPart;
+  /// The tool call this update belongs to.
+  final String toolCallId;
+
+  /// Status reported with this update (`pending`, `in_progress`).
+  final String? status;
+
+  /// Concatenated text content of this update (argument or output chunks).
+  final String text;
 }
 
-/// Emitted when a tool finishes executing.
+/// Emitted when a tool finishes executing (`tool_call_update` with status
+/// `completed` or `failed`).
 class ToolResultEvent extends KimiEvent {
   /// Creates a [ToolResultEvent].
   const ToolResultEvent({
     required this.toolCallId,
     required this.isError,
     required this.output,
-    required this.message,
     required super.raw,
   });
 
@@ -103,59 +111,33 @@ class ToolResultEvent extends KimiEvent {
   /// Whether the tool reported a failure.
   final bool isError;
 
-  /// String output (for structured output, inspect [raw]).
+  /// Tool output: `rawOutput` when present, otherwise the update's text
+  /// content. For structured output, inspect [raw].
   final String output;
-
-  /// Human-readable one-line summary from the CLI.
-  final String message;
 }
 
-/// Emitted with token usage / context info during the turn.
-class StatusUpdateEvent extends KimiEvent {
-  /// Creates a [StatusUpdateEvent].
-  const StatusUpdateEvent({
-    required this.inputTokens,
-    required this.outputTokens,
-    required this.contextWindow,
-    required super.raw,
-  });
+/// Emitted when the agent publishes or updates its plan (`plan`).
+class PlanEvent extends KimiEvent {
+  /// Creates a [PlanEvent].
+  const PlanEvent({required this.entries, required super.raw});
 
-  /// Input tokens consumed so far, or null if not reported.
-  final int? inputTokens;
-
-  /// Output tokens produced so far, or null if not reported.
-  final int? outputTokens;
-
-  /// Current context-window size if reported.
-  final int? contextWindow;
+  /// Plan entries as raw maps (`content`, `priority`, `status`).
+  final List<Map<String, Object?>> entries;
 }
 
-/// Context compaction begin / end (no payload).
-class CompactionEvent extends KimiEvent {
-  /// Creates a [CompactionEvent].
-  const CompactionEvent({required this.started, required super.raw});
-
-  /// `true` for CompactionBegin, `false` for CompactionEnd.
-  final bool started;
-}
-
-/// Emitted when a subagent fires an event.
-class SubagentEvent extends KimiEvent {
-  /// Creates a [SubagentEvent].
-  const SubagentEvent({required super.raw});
-}
-
-/// Emitted when the agent needs the user to approve a tool call.
+/// Emitted when the agent needs the user to approve a tool call
+/// (ACP `session/request_permission`).
 ///
-/// Respond with [KimiTurn.approve].
+/// Respond with [KimiTurn.approve]. Not emitted when `yoloMode` is on —
+/// the SDK auto-approves.
 class ApprovalRequestEvent extends KimiEvent {
   /// Creates an [ApprovalRequestEvent].
   const ApprovalRequestEvent({
     required this.id,
     required this.toolCallId,
     required this.sender,
-    required this.action,
     required this.description,
+    required this.options,
     required super.raw,
   });
 
@@ -165,21 +147,24 @@ class ApprovalRequestEvent extends KimiEvent {
   /// The tool call this approval is for.
   final String toolCallId;
 
-  /// Tool name requesting approval, e.g. `Shell`, `WriteFile`.
+  /// Tool title requesting approval, e.g. `Bash`, `WriteFile`.
   final String sender;
 
-  /// Short action phrase, e.g. `run shell command`.
-  final String action;
-
-  /// Detailed human-readable description, e.g. ``Run command `rm -rf /` ``.
+  /// Human-readable description, e.g.
+  /// ``Requesting approval to Running: ls -la``.
   final String description;
+
+  /// The options the CLI offered. [KimiTurn.approve] picks by
+  /// [ApprovalResponse.optionKind]; inspect these to build a richer UI.
+  final List<ApprovalOption> options;
 }
 
-/// Fallback for any event type the SDK doesn't have a typed class for yet.
+/// Fallback for any session update the SDK doesn't have a typed class for
+/// (e.g. `available_commands_update`, `current_mode_update`).
 class UnknownEvent extends KimiEvent {
   /// Creates an [UnknownEvent].
   const UnknownEvent({required this.type, required super.raw});
 
-  /// Original `type` string as reported by the CLI.
+  /// Original `sessionUpdate` string as reported by the CLI.
   final String type;
 }

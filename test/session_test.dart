@@ -1,13 +1,20 @@
 import 'package:flutter_kimi_sdk/flutter_kimi_sdk.dart';
 import 'package:test/test.dart';
 
+Map<String, Object?> update(Map<String, Object?> u) => <String, Object?>{
+      'sessionId': 'session_test',
+      'update': u,
+    };
+
 void main() {
   group('KimiTurnStatus.parse', () {
-    test('maps known statuses', () {
-      expect(KimiTurnStatus.parse('finished'), KimiTurnStatus.finished);
+    test('maps ACP stop reasons', () {
+      expect(KimiTurnStatus.parse('end_turn'), KimiTurnStatus.finished);
       expect(KimiTurnStatus.parse('cancelled'), KimiTurnStatus.cancelled);
-      expect(KimiTurnStatus.parse('max_steps_reached'),
+      expect(KimiTurnStatus.parse('max_turn_requests'),
           KimiTurnStatus.maxStepsReached);
+      expect(KimiTurnStatus.parse('max_tokens'), KimiTurnStatus.maxTokens);
+      expect(KimiTurnStatus.parse('refusal'), KimiTurnStatus.refusal);
     });
 
     test('falls back to unknown', () {
@@ -17,62 +24,127 @@ void main() {
   });
 
   group('ApprovalResponse', () {
-    test('wire values', () {
-      expect(ApprovalResponse.approve.wireValue, 'approve');
-      expect(ApprovalResponse.approveForSession.wireValue, 'approve_for_session');
-      expect(ApprovalResponse.reject.wireValue, 'reject');
+    test('option kinds', () {
+      expect(ApprovalResponse.approve.optionKind, 'allow_once');
+      expect(ApprovalResponse.approveForSession.optionKind, 'allow_always');
+      expect(ApprovalResponse.reject.optionKind, 'reject_once');
     });
   });
 
-  group('event decoding', () {
-    // We can't spawn a real CLI in unit tests, but we can drive the decoder
-    // directly via a dedicated test hook to confirm wire payload shapes map
-    // onto the right event types.
-    Future<KimiSession> startFake() => KimiSession.start(
-          workDir: '.',
-          executable: '/bin/cat', // never speaks wire protocol; we never prompt
-        );
-
-    test('decodes ContentPart text', () async {
-      final session = await startFake();
-      addTearDown(session.close);
-      final event = session.decodeEventForTest(
-        'ContentPart',
-        <String, Object?>{'type': 'text', 'text': 'hello'},
-      );
+  group('session update decoding', () {
+    test('decodes agent_message_chunk as text', () {
+      final event = KimiSession.decodeSessionUpdate(update({
+        'sessionUpdate': 'agent_message_chunk',
+        'content': {'type': 'text', 'text': 'hello'},
+      }));
       expect(event, isA<ContentPartEvent>());
       final e = event as ContentPartEvent;
       expect(e.kind, ContentKind.text);
       expect(e.text, 'hello');
     });
 
-    test('decodes ToolCall', () async {
-      final session = await startFake();
-      addTearDown(session.close);
-      final event = session.decodeEventForTest(
-        'ToolCall',
-        <String, Object?>{
-          'type': 'function',
-          'id': 'tc_1',
-          'function': {'name': 'shell', 'arguments': '{"cmd":"ls"}'},
-        },
-      );
-      expect(event, isA<ToolCallEvent>());
-      final e = event as ToolCallEvent;
-      expect(e.id, 'tc_1');
-      expect(e.name, 'shell');
-      expect(e.arguments, '{"cmd":"ls"}');
+    test('decodes agent_thought_chunk as thinking', () {
+      final event = KimiSession.decodeSessionUpdate(update({
+        'sessionUpdate': 'agent_thought_chunk',
+        'content': {'type': 'text', 'text': 'hmm'},
+      }));
+      final e = event as ContentPartEvent;
+      expect(e.kind, ContentKind.thinking);
+      expect(e.text, 'hmm');
     });
 
-    test('decodes unknown as UnknownEvent', () async {
-      final session = await startFake();
-      addTearDown(session.close);
-      final event = session.decodeEventForTest(
-        'SomethingNew',
-        <String, Object?>{'x': 1},
-      );
+    test('decodes tool_call', () {
+      final event = KimiSession.decodeSessionUpdate(update({
+        'sessionUpdate': 'tool_call',
+        'toolCallId': '0:tool_abc',
+        'title': 'Bash',
+        'kind': 'execute',
+        'status': 'pending',
+      }));
+      expect(event, isA<ToolCallEvent>());
+      final e = event as ToolCallEvent;
+      expect(e.id, '0:tool_abc');
+      expect(e.name, 'Bash');
+      expect(e.kind, 'execute');
+      expect(e.status, 'pending');
+      expect(e.arguments, isNull);
+    });
+
+    test('decodes in-progress tool_call_update as ToolCallUpdateEvent', () {
+      final event = KimiSession.decodeSessionUpdate(update({
+        'sessionUpdate': 'tool_call_update',
+        'toolCallId': '0:tool_abc',
+        'status': 'in_progress',
+        'content': [
+          {
+            'type': 'content',
+            'content': {'type': 'text', 'text': '{"cmd":'},
+          },
+        ],
+      }));
+      expect(event, isA<ToolCallUpdateEvent>());
+      final e = event as ToolCallUpdateEvent;
+      expect(e.toolCallId, '0:tool_abc');
+      expect(e.status, 'in_progress');
+      expect(e.text, '{"cmd":');
+    });
+
+    test('decodes completed tool_call_update as ToolResultEvent', () {
+      final event = KimiSession.decodeSessionUpdate(update({
+        'sessionUpdate': 'tool_call_update',
+        'toolCallId': '0:tool_abc',
+        'status': 'completed',
+        'content': [
+          {
+            'type': 'content',
+            'content': {'type': 'text', 'text': 'hello-acp\n'},
+          },
+        ],
+        'rawOutput': 'hello-acp\n',
+      }));
+      expect(event, isA<ToolResultEvent>());
+      final e = event as ToolResultEvent;
+      expect(e.toolCallId, '0:tool_abc');
+      expect(e.isError, isFalse);
+      expect(e.output, 'hello-acp\n');
+    });
+
+    test('decodes failed tool_call_update as error ToolResultEvent', () {
+      final event = KimiSession.decodeSessionUpdate(update({
+        'sessionUpdate': 'tool_call_update',
+        'toolCallId': '0:tool_abc',
+        'status': 'failed',
+        'content': [
+          {
+            'type': 'content',
+            'content': {'type': 'text', 'text': 'boom'},
+          },
+        ],
+      }));
+      final e = event as ToolResultEvent;
+      expect(e.isError, isTrue);
+      expect(e.output, 'boom');
+    });
+
+    test('decodes plan', () {
+      final event = KimiSession.decodeSessionUpdate(update({
+        'sessionUpdate': 'plan',
+        'entries': [
+          {'content': 'step 1', 'priority': 'high', 'status': 'pending'},
+        ],
+      }));
+      expect(event, isA<PlanEvent>());
+      expect((event as PlanEvent).entries, hasLength(1));
+      expect(event.entries.first['content'], 'step 1');
+    });
+
+    test('decodes unknown update types as UnknownEvent', () {
+      final event = KimiSession.decodeSessionUpdate(update({
+        'sessionUpdate': 'available_commands_update',
+        'availableCommands': <Object>[],
+      }));
       expect(event, isA<UnknownEvent>());
-      expect((event as UnknownEvent).type, 'SomethingNew');
+      expect((event as UnknownEvent).type, 'available_commands_update');
     });
   });
 }

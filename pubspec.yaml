@@ -1,9 +1,9 @@
 name: flutter_kimi_sdk
 description: >-
-  Dart/Flutter client for the Kimi Agent SDK. Drives the Kimi Code CLI over its
-  wire protocol to stream agent responses, handle tool approvals, and run
+  Dart/Flutter client for the Kimi Code CLI. Drives `kimi acp` over the Agent
+  Client Protocol to stream agent responses, handle tool approvals, and run
   multi-turn conversations from Flutter desktop apps or pure Dart programs.
-version: 0.2.0
+version: 0.3.0
 homepage: https://github.com/epatel/flutter_kimi_sdk
 repository: https://github.com/epatel/flutter_kimi_sdk
 issue_tracker: https://github.com/epatel/flutter_kimi_sdk/issues

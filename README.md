@@ -1,14 +1,15 @@
 # flutter_kimi_sdk
 
-A Dart/Flutter client for the [Kimi Agent SDK](https://github.com/MoonshotAI/kimi-agent-sdk)
-by Moonshot AI. This package drives the `kimi` CLI over its JSON-RPC "wire"
-protocol (v1.7), so you can embed Kimi Code agent runs inside Dart programs or
-Flutter desktop apps — streaming text, handling tool-call approvals, and
-running multi-turn conversations.
+A Dart/Flutter client for the [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code)
+by Moonshot AI. This package drives `kimi acp` — the CLI's
+[Agent Client Protocol](https://agentclientprotocol.com) (ACP) server — so you
+can embed Kimi Code agent runs inside Dart programs or Flutter desktop apps:
+streaming text, handling tool-call approvals, and running multi-turn
+conversations.
 
-> Like the official SDKs, this is a **thin wrapper** around the Kimi CLI. You
-> must install the `kimi` binary separately and make sure it's on your `PATH`
-> (or pass `executable:` explicitly).
+> This is a **thin wrapper** around the Kimi CLI. You must install the `kimi`
+> binary separately and make sure it's on your `PATH` (or pass `executable:`
+> explicitly). Requires a CLI version with the `acp` subcommand (0.22+).
 
 ## Platform support
 
@@ -20,17 +21,16 @@ running multi-turn conversations.
 
 ## Prerequisites
 
-1. Install the Kimi CLI: <https://github.com/MoonshotAI/kimi-cli>.
-2. Run `kimi login` once. The CLI stores OAuth tokens under
-   `~/.kimi/credentials/` and refreshes them automatically — no API key to
-   plumb through, no env vars to export.
-3. Verify: `kimi --version`.
+1. Install the Kimi Code CLI: <https://github.com/MoonshotAI/kimi-code>.
+2. Run `kimi login` once. The CLI stores OAuth tokens and refreshes them
+   automatically — no API key to plumb through, no env vars to export.
+3. Verify: `kimi --version` (0.22 or later).
 
 ## Install
 
 ```yaml
 dependencies:
-  flutter_kimi_sdk: ^0.2.0
+  flutter_kimi_sdk: ^0.3.0
 ```
 
 ## Quick start
@@ -42,7 +42,6 @@ import 'package:flutter_kimi_sdk/flutter_kimi_sdk.dart';
 Future<void> main() async {
   final session = await KimiSession.start(
     workDir: Directory.current.path,
-    model: 'kimi-k2.7-code', // or leave null for the CLI default
     yoloMode: true, // auto-approve tool calls for demo purposes
   );
   await session.initialize();
@@ -52,26 +51,34 @@ Future<void> main() async {
     if (event is ContentPartEvent && event.kind == ContentKind.text) {
       stdout.write(event.text);
     } else if (event is ToolCallEvent) {
-      stderr.writeln('\n[tool] ${event.name}(${event.arguments ?? ''})');
+      stderr.writeln('\n[tool] ${event.name}');
     }
   });
 
   final result = await turn.result;
-  stdout.writeln('\n--\nStatus: ${result.status}, steps: ${result.steps}');
+  stdout.writeln('\n--\nStatus: ${result.status}');
   await session.close();
 }
 ```
 
-## Models
+## Models, thinking, and modes
 
-The `model:` value is passed straight through to `kimi --model`, so any id the
-CLI accepts works. Current Moonshot ids: `kimi-k2.7-code` (default) and its
-faster `kimi-k2.7-code-highspeed` variant, plus `kimi-k2.6`, `kimi-k2.5`, and
-`moonshot-v1`. Leave it `null` to take the CLI default.
+Session configuration goes through ACP config options. The `initialize()`
+result lists what's available under `configOptions`; the SDK applies your
+choices right after the session is created:
+
+- `model:` — an ACP model value, e.g. `kimi-code/kimi-for-coding`. Leave null
+  for the CLI default. Invalid values fail `initialize()` with a
+  `KimiCliException`.
+- `thinking:` — `true`/`false` to force thinking on/off, or null (default) to
+  keep the CLI's setting.
+- `yoloMode:` — sets the session mode to `yolo` (auto-approve everything). The
+  CLI also offers `default`, `plan`, and `auto` modes; select those yourself
+  via the raw config options if you need them.
 
 ## Handling approvals
 
-With `yoloMode: false` the CLI will ask for confirmation before running tools.
+With `yoloMode: false` the CLI asks for confirmation before running tools.
 Listen for `ApprovalRequestEvent` and respond via `turn.approve`:
 
 ```dart
@@ -86,29 +93,34 @@ turn.events.listen((event) async {
 });
 ```
 
+`ApprovalResponse.approveForSession` selects the CLI's "approve for this
+session" option. The event's `options` list carries everything the CLI
+offered, if you want to build a richer UI.
+
 ## Cancellation
 
 ```dart
-await turn.interrupt();     // ask the agent to stop; result resolves to cancelled
+await turn.interrupt();     // ACP session/cancel; result resolves to cancelled
 await session.close();       // shut down the CLI process
 ```
 
+## Resuming sessions
+
+`session.acpSessionId` identifies the conversation. Pass it back as
+`sessionId:` to a later `KimiSession.start` to resume via ACP `session/load`.
+
 ## Event types
 
-| Class | CLI event | Notes |
+| Class | ACP source | Notes |
 |---|---|---|
-| `TurnBeginEvent` | `TurnBegin` | User input echoed back. |
-| `StepBeginEvent` | `StepBegin` | New reasoning step starts. |
-| `StepInterruptedEvent` | `StepInterrupted` | Step was cancelled. |
-| `ContentPartEvent` | `ContentPart` | `kind` is `text`, `thinking`, or `other`. |
-| `ToolCallEvent` | `ToolCall` | Tool invocation started. |
-| `ToolCallPartEvent` | `ToolCallPart` | Streaming tool-call arguments chunk. |
-| `ToolResultEvent` | `ToolResult` | Tool finished (may be an error). |
-| `StatusUpdateEvent` | `StatusUpdate` | Token usage / context info. |
-| `CompactionEvent` | `CompactionBegin`/`End` | Context compaction started/finished. |
-| `SubagentEvent` | `SubagentEvent` | Nested-agent event. |
-| `ApprovalRequestEvent` | (server request) | Tool needs approval. |
-| `UnknownEvent` | any other | Forward-compat fallback. |
+| `TurnBeginEvent` | (synthetic) | Emitted when `session/prompt` is sent. |
+| `ContentPartEvent` | `agent_message_chunk` / `agent_thought_chunk` | `kind` is `text`, `thinking`, or `other`. |
+| `ToolCallEvent` | `tool_call` | Tool invocation started (`name`, `kind`, `status`). |
+| `ToolCallUpdateEvent` | `tool_call_update` (in progress) | Streaming argument/output chunks. |
+| `ToolResultEvent` | `tool_call_update` (completed/failed) | Tool finished; `output` from `rawOutput`. |
+| `PlanEvent` | `plan` | Agent plan entries. |
+| `ApprovalRequestEvent` | `session/request_permission` | Tool needs approval (not in yolo mode). |
+| `UnknownEvent` | any other update | Forward-compat fallback. |
 
 Every event carries the original decoded JSON via `event.raw` if you need
 fields the typed wrapper doesn't expose.
@@ -120,9 +132,10 @@ package.
 
 ## Versioning & compatibility
 
-- Tracks wire protocol **v1.7**.
-- Breaking changes to the wire protocol will bump the minor version here.
-- Unknown event types and payload fields degrade gracefully via
+- Tracks **ACP protocol v1** as served by Kimi Code CLI 0.22+.
+- Versions before 0.3.0 spoke the CLI's legacy `--wire` protocol, which the
+  CLI has removed.
+- Unknown update types and payload fields degrade gracefully via
   `UnknownEvent` and `event.raw`.
 
 ## License

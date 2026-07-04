@@ -1,4 +1,5 @@
-// [KimiSession] drives the `kimi` CLI over its JSON-RPC wire protocol.
+// [KimiSession] drives the `kimi` CLI as an Agent Client Protocol (ACP)
+// server over stdin/stdout (`kimi acp`).
 
 import 'dart:async';
 import 'dart:convert';
@@ -10,14 +11,14 @@ import 'errors.dart';
 import 'events.dart';
 import 'types.dart';
 
-/// Wire protocol version this SDK speaks.
-const String kKimiProtocolVersion = '1.7';
+/// ACP protocol version this SDK speaks.
+const int kKimiAcpProtocolVersion = 1;
 
 /// SDK self-identification sent during `initialize`.
 const String kKimiSdkName = 'flutter_kimi_sdk';
 
 /// SDK version sent during `initialize`.
-const String kKimiSdkVersion = '0.2.0';
+const String kKimiSdkVersion = '0.3.0';
 
 /// Lifecycle of a [KimiSession].
 enum KimiSessionState {
@@ -44,10 +45,9 @@ enum KimiSessionState {
 /// awaiting [result] before draining [events] will not deadlock — events
 /// complete before the result resolves.
 class KimiTurn {
-  KimiTurn._(this._session, this._requestId);
+  KimiTurn._(this._session);
 
   final KimiSession _session;
-  final String _requestId;
   final StreamController<KimiEvent> _events = StreamController<KimiEvent>();
   final Completer<KimiRunResult> _result = Completer<KimiRunResult>();
 
@@ -57,15 +57,17 @@ class KimiTurn {
   /// Future resolving to the final status of the turn.
   Future<KimiRunResult> get result => _result.future;
 
-  /// Approve or deny an [ApprovalRequestEvent].
-  Future<void> approve(String requestId, ApprovalResponse response,
-      {String? reason}) {
-    return _session._sendApproval(requestId, response, reason: reason);
+  /// Respond to an [ApprovalRequestEvent].
+  ///
+  /// [requestId] is [ApprovalRequestEvent.id]. The SDK selects the offered
+  /// option whose kind matches [ApprovalResponse.optionKind].
+  Future<void> approve(String requestId, ApprovalResponse response) {
+    return _session._respondToPermission(requestId, response);
   }
 
-  /// Interrupt the running turn. The turn will finish with
-  /// [KimiTurnStatus.cancelled].
-  Future<void> interrupt() => _session._interrupt();
+  /// Interrupt the running turn (ACP `session/cancel`). The turn will finish
+  /// with [KimiTurnStatus.cancelled].
+  Future<void> interrupt() => _session._cancel();
 
   void _pushEvent(KimiEvent event) {
     if (!_events.isClosed) _events.add(event);
@@ -82,7 +84,15 @@ class KimiTurn {
   }
 }
 
-/// A Kimi CLI session.
+class _PermissionRequest {
+  _PermissionRequest(this.rpcId, this.options);
+
+  /// The JSON-RPC request id, echoed back verbatim in the response.
+  final Object rpcId;
+  final List<ApprovalOption> options;
+}
+
+/// A Kimi CLI session over ACP.
 ///
 /// Spawn with [KimiSession.start], then call [initialize] once before sending
 /// prompts. Always call [close] when done (or use inside a try/finally).
@@ -98,31 +108,37 @@ class KimiSession {
     required this.protocolVersion,
   });
 
-  /// The working directory passed to the CLI via `--work-dir`.
+  /// The working directory sent to the CLI as the session `cwd`.
   final String workDir;
 
-  /// Session ID. When null the CLI will mint one.
+  /// Existing ACP session ID to resume via `session/load`. When null a new
+  /// session is created and [acpSessionId] holds the CLI-minted ID after
+  /// [initialize].
   final String? sessionId;
 
   /// Path / name of the kimi executable.
   final String executable;
 
-  /// Model identifier to use, or null to take the CLI default.
+  /// Model config value to select (e.g. `kimi-code/kimi-for-coding`), or null
+  /// to take the CLI default. See `configOptions` in the [initialize] result
+  /// for the available values.
   final String? model;
 
-  /// Whether to request thinking mode.
-  final bool thinking;
+  /// Thinking mode: `true` selects `on`, `false` selects `off`, null leaves
+  /// the CLI default untouched.
+  final bool? thinking;
 
-  /// Whether to auto-approve all tool calls.
+  /// Whether to auto-approve all tool calls. Sets the session mode to `yolo`
+  /// and answers any remaining permission requests with the first
+  /// `allow` option, so no [ApprovalRequestEvent] is emitted.
   final bool yoloMode;
 
   /// Extra environment variables to pass to the child process.
   final Map<String, String>? environment;
 
-  /// Wire protocol version announced in `initialize`. Defaults to
-  /// [kKimiProtocolVersion]; override if your `kimi` CLI is on an older
-  /// protocol (try "1.0", "1.5", etc.).
-  final String protocolVersion;
+  /// ACP protocol version announced in `initialize`. Defaults to
+  /// [kKimiAcpProtocolVersion].
+  final int protocolVersion;
 
   /// Callback invoked for each line the CLI writes to stderr. Useful for
   /// surfacing authentication / configuration errors during development.
@@ -136,28 +152,34 @@ class KimiSession {
   StreamSubscription<String>? _stdoutSub;
   StreamSubscription<String>? _stderrSub;
   final _pending = <String, Completer<Object?>>{};
+  final _permissionRequests = <String, _PermissionRequest>{};
   KimiTurn? _activeTurn;
   int _nextRequestId = 1;
   String _newRequestId() => '${_nextRequestId++}';
   KimiSessionState _state = KimiSessionState.created;
   final StringBuffer _stderrBuffer = StringBuffer();
+  String? _acpSessionId;
 
   /// Current lifecycle state.
   KimiSessionState get state => _state;
 
+  /// The ACP session ID, available after [initialize]. Pass it as `sessionId`
+  /// to a later [KimiSession.start] to resume the conversation.
+  String? get acpSessionId => _acpSessionId;
+
   /// Start a session.
   ///
-  /// This spawns the CLI but does not send `initialize` — call [initialize]
-  /// before the first [prompt].
+  /// This spawns `<executable> acp` but does not perform the handshake —
+  /// call [initialize] before the first [prompt].
   static Future<KimiSession> start({
     required String workDir,
     String? sessionId,
     String executable = 'kimi',
     String? model,
-    bool thinking = false,
+    bool? thinking,
     bool yoloMode = false,
     Map<String, String>? environment,
-    String protocolVersion = kKimiProtocolVersion,
+    int protocolVersion = kKimiAcpProtocolVersion,
     void Function(String line)? onStderr,
     void Function(String direction, String json)? onWire,
   }) async {
@@ -179,21 +201,11 @@ class KimiSession {
 
   Future<void> _spawn() async {
     _state = KimiSessionState.starting;
-    final args = <String>[
-      if (sessionId != null) ...['--session', sessionId!],
-      '--work-dir',
-      workDir,
-      '--wire',
-      if (model != null) ...['--model', model!],
-      thinking ? '--thinking' : '--no-thinking',
-      if (yoloMode) '--yolo',
-    ];
-
     final Process proc;
     try {
       proc = await Process.start(
         executable,
-        args,
+        const ['acp'],
         environment: environment,
         workingDirectory: workDir,
       );
@@ -230,11 +242,17 @@ class KimiSession {
     unawaited(proc.exitCode.then(_handleProcessExit));
   }
 
-  /// Perform the initial `initialize` handshake. Safe to await once.
+  /// Perform the ACP handshake: `initialize`, then `session/new` (or
+  /// `session/load` when resuming), then apply the `model` / `thinking` /
+  /// `yoloMode` configuration. Safe to await once.
+  ///
+  /// Returns the `session/new` result, whose `configOptions` list the
+  /// available models, thinking levels, and modes.
   ///
   /// Throws a [KimiTransportException] (with any buffered stderr) if the CLI
-  /// doesn't answer within [timeout] — a common symptom of a missing binary,
-  /// missing credentials, or version-mismatched CLI.
+  /// doesn't answer within [timeout] — a common symptom of a missing binary
+  /// or version-mismatched CLI — and a [KimiCliException] if the CLI rejects
+  /// a step (e.g. not authenticated: run `kimi login`).
   Future<Map<String, Object?>> initialize({
     Duration timeout = const Duration(seconds: 15),
   }) async {
@@ -244,17 +262,9 @@ class KimiSession {
         'initialize() may only be called once after start(), current state: $_state',
       );
     }
-    final req = _sendRequest('initialize', {
-      'protocol_version': protocolVersion,
-      'client': {'name': kKimiSdkName, 'version': kKimiSdkVersion},
-      'capabilities': {
-        'supports_question': true,
-        'supports_plan_mode': true,
-      },
-    });
-    final Object? res;
+    final Object? sessionRes;
     try {
-      res = await req.timeout(timeout);
+      sessionRes = await _handshake().timeout(timeout);
     } on TimeoutException {
       throw KimiTransportException(
         'INITIALIZE_TIMEOUT',
@@ -263,11 +273,69 @@ class KimiSession {
       );
     }
     _state = KimiSessionState.idle;
-    if (res is Map<String, Object?>) return res;
+    if (sessionRes is Map<String, Object?>) return sessionRes;
     return <String, Object?>{};
   }
 
+  Future<Object?> _handshake() async {
+    await _sendRequest('initialize', {
+      'protocolVersion': protocolVersion,
+      'clientInfo': {'name': kKimiSdkName, 'version': kKimiSdkVersion},
+      'clientCapabilities': {
+        'fs': {'readTextFile': false, 'writeTextFile': false},
+        'terminal': false,
+      },
+    });
+
+    final Object? sessionRes;
+    if (sessionId != null) {
+      sessionRes = await _sendRequest('session/load', {
+        'sessionId': sessionId,
+        'cwd': workDir,
+        'mcpServers': const <Object>[],
+      });
+      _acpSessionId = sessionId;
+    } else {
+      sessionRes = await _sendRequest('session/new', {
+        'cwd': workDir,
+        'mcpServers': const <Object>[],
+      });
+      if (sessionRes is Map<String, Object?>) {
+        _acpSessionId = sessionRes['sessionId']?.toString();
+      }
+    }
+    if (_acpSessionId == null) {
+      throw KimiProtocolException(
+        'NO_SESSION_ID',
+        'CLI did not return a session ID from session/new',
+        details: sessionRes,
+      );
+    }
+
+    if (model != null) {
+      await _setConfigOption('model', model!);
+    }
+    if (thinking != null) {
+      await _setConfigOption('thinking', thinking! ? 'on' : 'off');
+    }
+    if (yoloMode) {
+      await _setConfigOption('mode', 'yolo');
+    }
+    return sessionRes;
+  }
+
+  Future<void> _setConfigOption(String configId, String value) async {
+    await _sendRequest('session/set_config_option', {
+      'sessionId': _acpSessionId,
+      'configId': configId,
+      'value': value,
+    });
+  }
+
   /// Send a prompt. Returns immediately with a [KimiTurn] you can drain.
+  ///
+  /// [userInput] is either a plain string (wrapped in a text content block)
+  /// or a list of ACP content-block maps (`{'type': 'text', 'text': ...}`).
   ///
   /// Only one turn can be active at a time — attempting to start another
   /// before the first finishes throws a [KimiSessionException].
@@ -278,29 +346,38 @@ class KimiSession {
         'prompt() requires state=idle, got $_state',
       );
     }
-    final id = _newRequestId();
-    final turn = KimiTurn._(this, id);
+    final blocks = switch (userInput) {
+      final String s => [
+          {'type': 'text', 'text': s}
+        ],
+      final List<Object?> l => l,
+      final Map<String, Object?> m => [m],
+      _ => throw KimiSessionException(
+          'INVALID_PROMPT',
+          'prompt() takes a String or a list of content-block maps, '
+          'got ${userInput.runtimeType}',
+        ),
+    };
+
+    final turn = KimiTurn._(this);
     _activeTurn = turn;
     _state = KimiSessionState.active;
 
-    _writeMessage({
-      'jsonrpc': '2.0',
-      'id': id,
-      'method': 'prompt',
-      'params': {'user_input': userInput},
+    final response = _sendRequest('session/prompt', {
+      'sessionId': _acpSessionId,
+      'prompt': blocks,
     });
+    turn._pushEvent(
+      TurnBeginEvent(userInput: blocks, raw: const <String, Object?>{}),
+    );
 
-    // Wire up the response completer for this request.
-    final completer = Completer<Object?>();
-    _pending[id] = completer;
-    completer.future.then((value) {
+    response.then((value) {
       final map = value is Map<String, Object?> ? value : <String, Object?>{};
-      final status = KimiTurnStatus.parse(map['status'] as String? ?? '');
-      final steps = map['steps'];
+      final stopReason = map['stopReason']?.toString();
       turn._complete(
         KimiRunResult(
-          status: status,
-          steps: steps is int ? steps : null,
+          status: KimiTurnStatus.parse(stopReason ?? ''),
+          stopReason: stopReason,
           raw: map,
         ),
       );
@@ -353,29 +430,47 @@ class KimiSession {
     return completer.future;
   }
 
-  Future<void> _sendApproval(
+  Future<void> _respondToPermission(
     String requestId,
-    ApprovalResponse response, {
-    String? reason,
-  }) async {
+    ApprovalResponse response,
+  ) async {
+    final req = _permissionRequests.remove(requestId);
+    if (req == null) {
+      throw KimiSessionException(
+        'UNKNOWN_APPROVAL',
+        'No pending approval request with id "$requestId"',
+      );
+    }
+    final wantedKind = response.optionKind;
+    final option = req.options
+        .where((o) => o.kind == wantedKind)
+        .firstOrNull ??
+        // A rejection should still reject if only reject_always is offered.
+        (response == ApprovalResponse.reject
+            ? req.options.where((o) => o.kind == 'reject_always').firstOrNull
+            : null);
+    if (option == null) {
+      throw KimiSessionException(
+        'NO_MATCHING_OPTION',
+        'CLI offered no "$wantedKind" option for approval "$requestId" '
+        '(offered: ${req.options.map((o) => o.kind).join(', ')})',
+      );
+    }
     _writeMessage({
       'jsonrpc': '2.0',
-      'id': requestId,
+      'id': req.rpcId,
       'result': {
-        'request_id': requestId,
-        'response': response.wireValue,
-        if (reason != null) 'reason': reason,
+        'outcome': {'outcome': 'selected', 'optionId': option.optionId},
       },
     });
   }
 
-  Future<void> _interrupt() async {
-    final turn = _activeTurn;
-    if (turn == null) return;
+  Future<void> _cancel() async {
+    if (_activeTurn == null) return;
     _writeMessage({
       'jsonrpc': '2.0',
-      'method': 'interrupt',
-      'params': {'request_id': turn._requestId},
+      'method': 'session/cancel',
+      'params': {'sessionId': _acpSessionId},
     });
   }
 
@@ -428,10 +523,13 @@ class KimiSession {
     }
     final method = msg['method'];
     if (method is String) {
-      if (method == 'request' && msg['id'] != null) {
-        _handleServerRequest(msg['params']);
-      } else {
-        _handleNotification(msg['params']);
+      final params = msg['params'];
+      final paramsMap =
+          params is Map<String, Object?> ? params : const <String, Object?>{};
+      if (msg.containsKey('id')) {
+        _handleAgentRequest(method, msg['id']!, paramsMap);
+      } else if (method == 'session/update') {
+        _handleSessionUpdate(paramsMap);
       }
     }
   }
@@ -462,122 +560,169 @@ class KimiSession {
     }
   }
 
-  void _handleNotification(Object? params) {
+  void _handleSessionUpdate(Map<String, Object?> params) {
     final turn = _activeTurn;
-    if (turn == null || params is! Map<String, Object?>) return;
-    final type = params['type'];
-    final payload = params['payload'];
-    final event = _decodeEvent(
-      type is String ? type : 'Unknown',
-      payload is Map<String, Object?> ? payload : const <String, Object?>{},
+    if (turn == null) return;
+    turn._pushEvent(decodeSessionUpdate(params));
+  }
+
+  void _handleAgentRequest(
+    String method,
+    Object rpcId,
+    Map<String, Object?> params,
+  ) {
+    if (method == 'session/request_permission') {
+      _handlePermissionRequest(rpcId, params);
+      return;
+    }
+    // fs/*, terminal/*, and anything else we didn't advertise.
+    _writeMessage({
+      'jsonrpc': '2.0',
+      'id': rpcId,
+      'error': {'code': -32601, 'message': 'Method not supported: $method'},
+    });
+  }
+
+  void _handlePermissionRequest(Object rpcId, Map<String, Object?> params) {
+    final options = <ApprovalOption>[
+      for (final o in params['options'] as List? ?? const [])
+        if (o is Map<String, Object?>)
+          ApprovalOption(
+            optionId: o['optionId']?.toString() ?? '',
+            name: o['name']?.toString() ?? '',
+            kind: o['kind']?.toString() ?? '',
+          ),
+    ];
+
+    if (yoloMode) {
+      // Belt and braces on top of mode=yolo: never surface approvals.
+      final allow = options.where((o) => o.kind == 'allow_always').firstOrNull ??
+          options.where((o) => o.kind == 'allow_once').firstOrNull ??
+          options.firstOrNull;
+      _writeMessage({
+        'jsonrpc': '2.0',
+        'id': rpcId,
+        'result': {
+          'outcome': allow == null
+              ? {'outcome': 'cancelled'}
+              : {'outcome': 'selected', 'optionId': allow.optionId},
+        },
+      });
+      return;
+    }
+
+    final turn = _activeTurn;
+    if (turn == null) {
+      _writeMessage({
+        'jsonrpc': '2.0',
+        'id': rpcId,
+        'result': {
+          'outcome': {'outcome': 'cancelled'},
+        },
+      });
+      return;
+    }
+
+    final requestId = 'perm_${_nextRequestId++}';
+    _permissionRequests[requestId] = _PermissionRequest(rpcId, options);
+
+    final toolCall = params['toolCall'];
+    final toolCallMap =
+        toolCall is Map<String, Object?> ? toolCall : const <String, Object?>{};
+    turn._pushEvent(
+      ApprovalRequestEvent(
+        id: requestId,
+        toolCallId: toolCallMap['toolCallId']?.toString() ?? '',
+        sender: toolCallMap['title']?.toString() ?? '',
+        description: _contentText(toolCallMap['content']),
+        options: options,
+        raw: params,
+      ),
     );
-    turn._pushEvent(event);
   }
 
-  void _handleServerRequest(Object? params) {
-    final turn = _activeTurn;
-    if (turn == null || params is! Map<String, Object?>) return;
-    final type = params['type'];
-    final payload = params['payload'];
-    if (type is! String || payload is! Map<String, Object?>) return;
-    if (type == 'ApprovalRequest') {
-      turn._pushEvent(
-        ApprovalRequestEvent(
-          id: payload['id']?.toString() ?? '',
-          toolCallId: payload['tool_call_id']?.toString() ?? '',
-          sender: payload['sender']?.toString() ?? '',
-          action: payload['action']?.toString() ?? '',
-          description: payload['description']?.toString() ?? '',
-          raw: payload,
-        ),
-      );
-    } else {
-      turn._pushEvent(UnknownEvent(type: type, raw: payload));
-    }
-  }
-
-  /// Test-only hook for exercising the event decoder without spawning a real
-  /// CLI session.
+  /// Decodes an ACP `session/update` params map into a typed [KimiEvent].
+  /// Exposed for testing; production traffic flows through the same path.
   @visibleForTesting
-  KimiEvent decodeEventForTest(String type, Map<String, Object?> payload) =>
-      _decodeEvent(type, payload);
-
-  KimiEvent _decodeEvent(String type, Map<String, Object?> payload) {
+  static KimiEvent decodeSessionUpdate(Map<String, Object?> params) {
+    final update = params['update'];
+    final u = update is Map<String, Object?> ? update : const <String, Object?>{};
+    final type = u['sessionUpdate']?.toString() ?? '';
     switch (type) {
-      case 'TurnBegin':
-        return TurnBeginEvent(userInput: payload['user_input'], raw: payload);
-      case 'StepBegin':
-        final n = payload['n'];
-        return StepBeginEvent(n: n is int ? n : 0, raw: payload);
-      case 'StepInterrupted':
-        return StepInterruptedEvent(raw: payload);
-      case 'ContentPart':
-        final kindRaw = payload['type']?.toString() ?? '';
-        final kind = switch (kindRaw) {
-          'text' => ContentKind.text,
-          'thinking' => ContentKind.thinking,
-          _ => ContentKind.other,
-        };
-        final text = switch (kind) {
-          ContentKind.text => payload['text']?.toString() ?? '',
-          ContentKind.thinking =>
-            (payload['text'] ?? payload['thinking'])?.toString() ?? '',
-          ContentKind.other => payload['text']?.toString() ?? '',
-        };
+      case 'agent_message_chunk':
+      case 'agent_thought_chunk':
+      case 'user_message_chunk':
+        final content = u['content'];
+        final contentMap = content is Map<String, Object?>
+            ? content
+            : const <String, Object?>{};
+        final isText = contentMap['type'] == 'text';
         return ContentPartEvent(
-          kind: kind,
-          text: text,
-          rawType: kindRaw,
-          raw: payload,
+          kind: !isText
+              ? ContentKind.other
+              : type == 'agent_thought_chunk'
+                  ? ContentKind.thinking
+                  : type == 'agent_message_chunk'
+                      ? ContentKind.text
+                      : ContentKind.other,
+          text: contentMap['text']?.toString() ?? '',
+          rawType: type,
+          raw: u,
         );
-      case 'ToolCall':
-        final fn = payload['function'];
-        final fnMap =
-            fn is Map<String, Object?> ? fn : const <String, Object?>{};
+      case 'tool_call':
+        final rawInput = u['rawInput'];
         return ToolCallEvent(
-          id: payload['id']?.toString() ?? '',
-          name: fnMap['name']?.toString() ?? '',
-          arguments: fnMap['arguments']?.toString(),
-          raw: payload,
+          id: u['toolCallId']?.toString() ?? '',
+          name: u['title']?.toString() ?? '',
+          kind: u['kind']?.toString(),
+          status: u['status']?.toString(),
+          arguments: rawInput == null ? null : jsonEncode(rawInput),
+          raw: u,
         );
-      case 'ToolCallPart':
-        return ToolCallPartEvent(
-          argumentsPart: payload['arguments_part']?.toString() ?? '',
-          raw: payload,
+      case 'tool_call_update':
+        final status = u['status']?.toString();
+        final text = _contentText(u['content']);
+        if (status == 'completed' || status == 'failed') {
+          final rawOutput = u['rawOutput'];
+          return ToolResultEvent(
+            toolCallId: u['toolCallId']?.toString() ?? '',
+            isError: status == 'failed',
+            output: rawOutput?.toString() ?? text,
+            raw: u,
+          );
+        }
+        return ToolCallUpdateEvent(
+          toolCallId: u['toolCallId']?.toString() ?? '',
+          status: status,
+          text: text,
+          raw: u,
         );
-      case 'ToolResult':
-        final ret = payload['return_value'];
-        final retMap =
-            ret is Map<String, Object?> ? ret : const <String, Object?>{};
-        return ToolResultEvent(
-          toolCallId: payload['tool_call_id']?.toString() ?? '',
-          isError: retMap['is_error'] == true,
-          output: retMap['output']?.toString() ?? '',
-          message: retMap['message']?.toString() ?? '',
-          raw: payload,
+      case 'plan':
+        return PlanEvent(
+          entries: [
+            for (final e in u['entries'] as List? ?? const [])
+              if (e is Map<String, Object?>) e,
+          ],
+          raw: u,
         );
-      case 'StatusUpdate':
-        final usage = payload['usage'];
-        final usageMap =
-            usage is Map<String, Object?> ? usage : const <String, Object?>{};
-        return StatusUpdateEvent(
-          inputTokens: _asInt(usageMap['input_tokens']),
-          outputTokens: _asInt(usageMap['output_tokens']),
-          contextWindow: _asInt(payload['context_window']),
-          raw: payload,
-        );
-      case 'CompactionBegin':
-        return CompactionEvent(started: true, raw: payload);
-      case 'CompactionEnd':
-        return CompactionEvent(started: false, raw: payload);
-      case 'SubagentEvent':
-        return SubagentEvent(raw: payload);
       default:
-        return UnknownEvent(type: type, raw: payload);
+        return UnknownEvent(type: type, raw: u);
     }
   }
 
-  static int? _asInt(Object? v) => v is int ? v : null;
+  /// Flattens an ACP tool-call `content` list to its text parts.
+  static String _contentText(Object? content) {
+    if (content is! List) return '';
+    final buffer = StringBuffer();
+    for (final item in content) {
+      if (item is! Map<String, Object?>) continue;
+      final inner = item['type'] == 'content' ? item['content'] : item;
+      if (inner is Map<String, Object?> && inner['type'] == 'text') {
+        buffer.write(inner['text'] ?? '');
+      }
+    }
+    return buffer.toString();
+  }
 
   void _handleStreamError(Object error, StackTrace trace) {
     _failAllPending(

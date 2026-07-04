@@ -1,6 +1,6 @@
 # flutter_kimi_sdk
 
-Dart/Flutter client SDK that drives the Kimi Code CLI (`kimi`) over a JSON-RPC wire protocol on stdin/stdout. Provides typed streaming events, tool approval handling, and multi-turn conversation management. Desktop and server only — requires `dart:io` process spawning (no iOS, Android, or web).
+Dart/Flutter client SDK that drives the Kimi Code CLI (`kimi acp`) over the Agent Client Protocol (ACP, JSON-RPC on stdin/stdout). Provides typed streaming events, tool approval handling, and multi-turn conversation management. Desktop and server only — requires `dart:io` process spawning (no iOS, Android, or web). Requires Kimi Code CLI 0.22+.
 
 ## Context cards
 

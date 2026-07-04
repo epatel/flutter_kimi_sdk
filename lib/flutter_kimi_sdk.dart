@@ -1,13 +1,13 @@
-/// Dart client for the Kimi Agent SDK.
+/// Dart client for the Kimi Code CLI.
 ///
-/// Spawns the `kimi` CLI with its wire protocol and exposes a typed streaming
-/// API. Works anywhere `dart:io` can spawn a process (desktop, server, Flutter
-/// desktop); not supported on iOS, Android, or web.
+/// Spawns `kimi acp` — the CLI's Agent Client Protocol (ACP) server — and
+/// exposes a typed streaming API. Works anywhere `dart:io` can spawn a
+/// process (desktop, server, Flutter desktop); not supported on iOS,
+/// Android, or web.
 ///
 /// ```dart
 /// final session = KimiSession.start(
 ///   workDir: Directory.current.path,
-///   model: 'kimi-k2.7-code',
 ///   yoloMode: true,
 /// );
 /// await session.initialize();
